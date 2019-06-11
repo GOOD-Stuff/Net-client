@@ -16,6 +16,8 @@ type ConnectInfo struct {
     conn_type   string      // udp/tcp
     auto        bool        // autosending
     data_type   bool        // true - string; false - hex
+    wait_recv   bool
+    file_path   string
 }
 
 
@@ -26,10 +28,11 @@ type ConnectInfo struct {
 -d - path to file with data
 -a - auto sending
 -w - wait answer ???
+-f - file with data
 */
 // ./net_client -ip 192.168.0.12 -pt 6000 -t udp -s -a
 // ./net_client -ip 192.168.0.12 -pt 6000 -t udp -w -a y/n
-// ./net_client -ip 11.200.1.1 -udp 12345 -t t ...
+// ./net_client -ip 11.200.1.1 -pt 12345 -t tcp ...
 func main () {
     fmt.Println("\tUDP client v0.1")
 
@@ -38,12 +41,10 @@ func main () {
     if (len(argsWithoutProg) > 0) {
         conn, _ = GrepParams(argsWithoutProg)
     } else {
-        fmt.Println("Enter IP address: ")
+        FillParams(&conn)
     }
 
-    fmt.Printf("IP %s\r\n", conn.ip_addr.IP.String())
-    fmt.Println("Please, enter your data:")
-
+    fmt.Printf("IP %s:%d\r\n", conn.ip_addr.IP.String(), conn.udp_port)
     if conn.conn_type == "udp" {
         WorkUdp(conn)
     } else {
@@ -61,10 +62,8 @@ func main () {
  */
 func GrepParams(args []string) (conn ConnectInfo, err error) {
     for i, arg := range args {
-        //fmt.Printf("%d) %s\r\n", i, arg)
         switch arg {
         case "-ip":
-//            fmt.Printf("Node IP: %s\r\n", args[i+1])
             conn.ip_addr.IP = net.ParseIP(args[i+1])
             if conn.ip_addr.IP == nil {
                 return conn, fmt.Errorf("GrepParams: illegal IP value - %s", args[i+1])
@@ -77,9 +76,13 @@ func GrepParams(args []string) (conn ConnectInfo, err error) {
         case "-s":
             if args[i+1] == "y" {
                 conn.data_type = true
-            } else {
-                conn.data_type = false
             }
+        case "-w":
+            if args[i+1] == "y" {
+                conn.wait_recv = true
+            }
+        case "-f":
+            // Read from file
         case "-h":
             fmt.Println("\tWelcome to NetClient v0.1")
             fmt.Println("NetClient - udp/tcp client, that allows to send specific data to specific node.")
@@ -93,14 +96,45 @@ func GrepParams(args []string) (conn ConnectInfo, err error) {
         }
     }
 
-    if conn.conn_type != "udp" || conn.conn_type != "tcp" {
+    if conn.conn_type != "tcp" {
         conn.conn_type = "udp"
     }
-
 
     return conn, err
 }
 
+
+/**
+  @brief
+  @param
+
+  @return
+ */
+func FillParams(conn *ConnectInfo) {
+    fmt.Print("Enter IP address: ")
+    conn.ip_addr.IP = net.ParseIP(ReadKeybrdData())
+    if conn.ip_addr.IP == nil {
+        panic("illegal IP value")
+    }
+
+    fmt.Print("Enter port: ")
+    val, _ := strconv.ParseUint(ReadKeybrdData(), 10, 16)
+    conn.udp_port = uint16(val)
+
+    fmt.Print("TCP or UDP? (y/n): ")
+    if ReadKeybrdData() == "y" {
+        conn.conn_type = "tcp"
+    } else {
+        conn.conn_type = "udp"
+    }
+
+    fmt.Print("Wait answer? (y/n): ")
+    if ReadKeybrdData() == "y" {
+        conn.wait_recv = true
+    }
+
+
+}
 
 
 /**
@@ -117,27 +151,37 @@ func WorkUdp(conn ConnectInfo) {
     }
     defer udp_conn.Close()
 
-    reader := bufio.NewReader(os.Stdin)
-    _data, err := reader.ReadString('\n')
-    if err != nil {
-        fmt.Println("Error on ReadString -", err)
-        return
-    }
-
-    var data []byte
-    if conn.data_type {
-        data = []byte(_data)
-    } else {
-        _sep_data := strings.Fields(_data)
-        data = StrDigToBytes(_sep_data)
-    }
-
-    if err = SendUdp(udp_conn, data); err != nil {
+    /*if err = udp_conn.SetReadDeadline(time.Now().Add(300)); err != nil { // 180 seconds for Receiving timeout
         panic(err)
-    }
+    }*/
+    for {
+        _data := ReadKeybrdData()
+        var data []byte
+        if conn.data_type {
+            data = []byte(_data)
+        } else {
+            _sep_data := strings.Fields(_data)
+            data = StrDigitToBytes(_sep_data)
+        }
 
-    var re []byte
-    udp_conn.Read(re)
+        if err = Send(udp_conn, data); err != nil {
+            panic(err)
+        }
+
+        if conn.wait_recv == true {
+            recv_data, _, err := Recv(udp_conn); if err != nil {
+                break
+            }
+            for i, recv := range recv_data {
+                fmt.Printf("%d) 0x%02x\r\n", i, recv)
+            }
+        }
+
+        fmt.Print("Reapeat? (y/n): ")
+        if ReadKeybrdData() != "y" {
+            break
+        }
+    }
 }
 
 
@@ -147,12 +191,14 @@ func WorkTcp(conn ConnectInfo) {
 
 
 /**
-  @brief Send data in UDP mode
-  @param[in] udp_conn - interface of UDP connection
-  @param[in] data     -
+  @brief Send data from network
+  @param[in] udp_conn - interface of net connection
+  @param[in] data     - data for sending
+
+  @return
 */
-func SendUdp(udp_conn net.Conn, data []byte) (err error) {
-    _, err = udp_conn.Write(data)
+func Send(conn net.Conn, data []byte) (err error) {
+    _, err = conn.Write(data)
     if err != nil {
         fmt.Printf("Error when send data: %v\r\n", err)
     }
@@ -161,8 +207,19 @@ func SendUdp(udp_conn net.Conn, data []byte) (err error) {
 }
 
 
-func RecvUdp() {
+/**
+  @brief Receive data from network
+  @param[in] udp_conn - interface of net connection
 
+  @return
+*/
+func Recv(conn net.Conn) (data []byte, count int, err error){
+    count, err = conn.Read(data); if err != nil {
+        fmt.Printf("Error when receive data: %v\r\n", err)
+        return
+    }
+
+    return
 }
 
 
@@ -172,11 +229,31 @@ func RecvUdp() {
 
   @return data - array of bytes (with hex representation of digits)
 */
-func StrDigToBytes(numbers []string) (data []byte) {
+func StrDigitToBytes(numbers []string) (data []byte) {
     for _, str := range numbers {
         _prt_data, _ := strconv.ParseUint(str, 16, 8)
         data = append(data, byte(_prt_data))
     }
 
+    return
+}
+
+
+/**
+  @brief Get data from user input (via stdin)
+  @param none
+
+  @return data - string from user input
+  @note If get error will call a panic
+ */
+func ReadKeybrdData() (data string) {
+    reader := bufio.NewReader(os.Stdin)
+    data, err := reader.ReadString('\n')
+    if err != nil {
+        fmt.Println("Error on ReadString -", err)
+        panic(err)
+    }
+
+    data = data[:len(data)-1] // drop \n
     return
 }
