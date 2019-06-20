@@ -3,6 +3,7 @@ package main
 import (
     "bufio"
     "fmt"
+    "log"
     "net"
     "os"
     "strconv"
@@ -11,13 +12,13 @@ import (
 
 
 type ConnectInfo struct {
-    ip_addr     net.IPAddr
-    udp_port    uint16
-    conn_type   string      // udp/tcp
-    auto        bool        // autosending
-    data_type   bool        // true - string; false - hex
-    wait_recv   bool
-    file_path   string
+    ip_addr   net.IPAddr
+    port      uint16
+    conn_type string      // udp/tcp
+    auto      bool        // autosending
+    data_type bool        // true - string; false - hex
+    wait_recv bool
+    file_path string
 }
 
 
@@ -34,7 +35,7 @@ type ConnectInfo struct {
 // ./net_client -ip 192.168.0.12 -pt 6000 -t udp -w -a y/n
 // ./net_client -ip 11.200.1.1 -pt 12345 -t tcp ...
 func main () {
-    fmt.Println("\tUDP client v0.1")
+    fmt.Println("\tUDP client v0.5")
 
     argsWithoutProg := os.Args[1:]
     var conn ConnectInfo
@@ -44,22 +45,17 @@ func main () {
         FillParams(&conn)
     }
 
-    fmt.Printf("IP %s:%d\r\n", conn.ip_addr.IP.String(), conn.udp_port)
-    if conn.conn_type == "udp" {
-        WorkUdp(conn)
-    } else {
-        WorkTcp(conn)
-    }
+    Work(conn)
 }
 
 
-/**
- @brief
- @param
+/*
+ @brief Get values from user command-line.
 
- @return
- @return
- */
+ @param[in] args - command-line string (like -ip 192.156.... -pt ... etc)
+
+ @return structure with information of connection and error
+*/
 func GrepParams(args []string) (conn ConnectInfo, err error) {
     for i, arg := range args {
         switch arg {
@@ -70,7 +66,7 @@ func GrepParams(args []string) (conn ConnectInfo, err error) {
             }
         case "-pt":
             val, _ := strconv.ParseUint(args[i+1], 10, 16)
-            conn.udp_port = uint16(val)
+            conn.port = uint16(val)
         case "-t":
             conn.conn_type = args[i+1]
         case "-s":
@@ -104,12 +100,13 @@ func GrepParams(args []string) (conn ConnectInfo, err error) {
 }
 
 
-/**
-  @brief
-  @param
+/*
+ @brief Fill parameters of connection (when doesn't have command-line arguments).
 
-  @return
- */
+ @param[out] conn - pointer to structure with information of connection
+
+ @return none
+*/
 func FillParams(conn *ConnectInfo) {
     fmt.Print("Enter IP address: ")
     conn.ip_addr.IP = net.ParseIP(ReadKeybrdData())
@@ -119,7 +116,7 @@ func FillParams(conn *ConnectInfo) {
 
     fmt.Print("Enter port: ")
     val, _ := strconv.ParseUint(ReadKeybrdData(), 10, 16)
-    conn.udp_port = uint16(val)
+    conn.port = uint16(val)
 
     fmt.Print("TCP or UDP? (y/n): ")
     if ReadKeybrdData() == "y" {
@@ -132,44 +129,33 @@ func FillParams(conn *ConnectInfo) {
     if ReadKeybrdData() == "y" {
         conn.wait_recv = true
     }
-
-
 }
 
 
-/**
-  @brief
-  @param[in]
+/*
+ @brief Implement network communication. Send data via TCP/UDP connection.
 
-  @return none
- */
-func WorkUdp(conn ConnectInfo) {
-    udp_conn, err := net.Dial(conn.conn_type, conn.ip_addr.String() + ":" + strconv.Itoa(int(conn.udp_port)))
+ @param[in] conn - structure with information of connection
+
+ @return none
+*/
+func Work(conn ConnectInfo) {
+    net_conn, err := net.Dial(conn.conn_type, conn.ip_addr.String() + ":" + strconv.Itoa(int(conn.port)))
     if err != nil {
-        fmt.Printf("Error on Dial %v\r\n", err)
+        log.Fatalf("Error on Dial %v\r\n", err)
         return
     }
-    defer udp_conn.Close()
+    defer net_conn.Close()
 
-    /*if err = udp_conn.SetReadDeadline(time.Now().Add(300)); err != nil { // 180 seconds for Receiving timeout
-        panic(err)
-    }*/
     for {
-        _data := ReadKeybrdData()
-        var data []byte
-        if conn.data_type {
-            data = []byte(_data)
-        } else {
-            _sep_data := strings.Fields(_data)
-            data = StrDigitToBytes(_sep_data)
-        }
+        data := PrepareData(conn)
 
-        if err = Send(udp_conn, data); err != nil {
+        if err = Send(net_conn, data); err != nil {
             panic(err)
         }
 
         if conn.wait_recv == true {
-            recv_data, _, err := Recv(udp_conn); if err != nil {
+            recv_data, _, err := Recv(net_conn); if err != nil {
                 break
             }
             for i, recv := range recv_data {
@@ -185,14 +171,11 @@ func WorkUdp(conn ConnectInfo) {
 }
 
 
-func WorkTcp(conn ConnectInfo) {
-
-}
-
-
 /**
   @brief Send data from network
+
   @param[in] udp_conn - interface of net connection
+
   @param[in] data     - data for sending
 
   @return
@@ -209,9 +192,12 @@ func Send(conn net.Conn, data []byte) (err error) {
 
 /**
   @brief Receive data from network
+
   @param[in] udp_conn - interface of net connection
 
-  @return
+  @return data - array of received bytes
+
+  @return err - error
 */
 func Recv(conn net.Conn) (data []byte, count int, err error){
     count, err = conn.Read(data); if err != nil {
@@ -225,6 +211,7 @@ func Recv(conn net.Conn) (data []byte, count int, err error){
 
 /**
   @brief Convert from string representation of hex values to array of hex bytes
+
   @param[in] numbers - array (slice?) of strings
 
   @return data - array of bytes (with hex representation of digits)
@@ -239,11 +226,33 @@ func StrDigitToBytes(numbers []string) (data []byte) {
 }
 
 
+/*
+ @brief Read data via keyboard and set to string or raw hex type
+
+ @param conn - structure with information about necessary data type
+
+ @return data - array of bytes
+ */
+func PrepareData(conn ConnectInfo) (data []byte) {
+    _data := ReadKeybrdData()
+    if conn.data_type {
+        data = []byte(_data)
+    } else {
+        _sep_data := strings.Fields(_data)
+        data = StrDigitToBytes(_sep_data)
+    }
+
+    return
+}
+
+
 /**
   @brief Get data from user input (via stdin)
+
   @param none
 
   @return data - string from user input
+
   @note If get error will call a panic
  */
 func ReadKeybrdData() (data string) {
